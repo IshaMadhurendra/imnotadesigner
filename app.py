@@ -1,16 +1,17 @@
 import io
 import os
 import time
+import concurrent.futures
 
 import httpx
 import streamlit as st
 from dotenv import load_dotenv
-from PIL import Image
+from PIL import Image, ImageDraw
 from streamlit_drawable_canvas import st_canvas
 
 load_dotenv()
 
-MAX_PIXELS = 9_000_000  # Stability AI limit is 9,437,184
+MAX_PIXELS = 9_000_000
 
 
 def resize_for_api(img: Image.Image) -> Image.Image:
@@ -25,13 +26,47 @@ def resize_for_api(img: Image.Image) -> Image.Image:
 
 
 def get_api_key():
-    """Get API key from Streamlit secrets (cloud) or .env (local)."""
     try:
         return st.secrets["STABILITY_API_KEY"]
     except (KeyError, FileNotFoundError):
         return os.getenv("STABILITY_API_KEY", "")
 
 
+def call_stability_api(sketch_bytes: bytes, prompt: str, control_strength: float,
+                       output_format: str, negative_prompt: str, seed: int, api_key: str):
+    """Call Stability AI sketch endpoint. Returns (Image, None) or (None, error_str)."""
+    form_data = {
+        "prompt": (None, prompt),
+        "control_strength": (None, str(control_strength)),
+        "output_format": (None, output_format),
+        "image": ("sketch.png", sketch_bytes, "image/png"),
+    }
+    if negative_prompt:
+        form_data["negative_prompt"] = (None, negative_prompt)
+    if seed > 0:
+        form_data["seed"] = (None, str(seed))
+
+    with httpx.Client(timeout=60.0) as client:
+        response = client.post(
+            "https://api.stability.ai/v2beta/stable-image/control/sketch",
+            headers={
+                "authorization": f"Bearer {api_key}",
+                "accept": "image/*",
+            },
+            files=form_data,
+        )
+
+    if response.status_code == 200:
+        return Image.open(io.BytesIO(response.content)), None
+    else:
+        try:
+            err = response.json()
+        except Exception:
+            err = response.text
+        return None, f"API error ({response.status_code}): {err}"
+
+
+# --- Page Config ---
 st.set_page_config(
     page_title="i'mnotadesigner",
     page_icon="✏️",
@@ -39,22 +74,19 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# --- Minimal, warm, classy CSS ---
+# --- CSS ---
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Söhne,ui-monospace,Menlo,Monaco,monospace&family=Source+Serif+4:opsz,wght@8..60,300;8..60,400;8..60,600&family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@300;400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,300;8..60,400;8..60,600&family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@300;400;500;600&display=swap');
 
 .stApp {
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
     background: #fafaf8;
 }
-
-/* Hide Streamlit chrome */
 #MainMenu, footer, header, .stDeployButton {display: none !important; visibility: hidden !important;}
 
-/* === HEADER === */
 .app-header {
-    padding: 3rem 0 2rem;
+    padding: 2.5rem 0 1.5rem;
     text-align: center;
 }
 .app-header h1 {
@@ -70,17 +102,15 @@ st.markdown("""
     color: #888;
     font-size: 0.82rem;
     margin-top: 0.5rem;
-    letter-spacing: 0.01em;
 }
 .divider {
     width: 40px;
     height: 2px;
     background: #e0ddd5;
-    margin: 1.5rem auto 0;
+    margin: 1.2rem auto 0;
     border-radius: 1px;
 }
 
-/* === SECTION LABELS === */
 .section-label {
     font-family: 'IBM Plex Mono', monospace;
     font-size: 0.68rem;
@@ -93,7 +123,6 @@ st.markdown("""
     border-bottom: 1px solid #eee;
 }
 
-/* === RENDER BUTTON === */
 .stButton > button[kind="primary"] {
     background: #1a1a1a !important;
     color: #fff !important;
@@ -103,7 +132,6 @@ st.markdown("""
     border-radius: 8px !important;
     padding: 0.75rem 2rem !important;
     font-size: 0.9rem !important;
-    letter-spacing: 0.01em !important;
     transition: all 0.2s ease !important;
     box-shadow: none !important;
 }
@@ -113,7 +141,6 @@ st.markdown("""
     box-shadow: 0 4px 12px rgba(0,0,0,0.1) !important;
 }
 
-/* === SECONDARY / DOWNLOAD BUTTONS === */
 .stButton > button:not([kind="primary"]),
 .stDownloadButton > button {
     background: #fff !important;
@@ -130,7 +157,6 @@ st.markdown("""
     background: #f5f5f2 !important;
 }
 
-/* === TEXT INPUTS === */
 .stTextArea textarea, .stTextInput input {
     background: #fff !important;
     border: 1px solid #e0ddd5 !important;
@@ -148,26 +174,14 @@ st.markdown("""
     color: #bbb !important;
 }
 
-/* === CHECKBOX === */
 .stCheckbox label {
     font-family: 'Inter', sans-serif !important;
     font-size: 0.78rem !important;
     color: #555 !important;
 }
-.stCheckbox label span[data-testid="stCheckboxLabel"] {
-    font-weight: 400;
-}
-
-/* === SLIDER === */
 .stSlider label { font-size: 0.8rem !important; color: #777 !important; }
+.stRadio label { font-family: 'Inter', sans-serif !important; font-size: 0.82rem !important; }
 
-/* === RADIO === */
-.stRadio label {
-    font-family: 'Inter', sans-serif !important;
-    font-size: 0.82rem !important;
-}
-
-/* === SIDEBAR === */
 section[data-testid="stSidebar"] {
     background: #f5f4f0;
     border-right: 1px solid #e8e6e0;
@@ -182,20 +196,15 @@ section[data-testid="stSidebar"] .stMarkdown h3 {
     margin-top: 1rem;
 }
 
-/* === IMAGES === */
 .stImage > img {
     border-radius: 8px;
     border: 1px solid #e8e6e0;
 }
-
-/* === STATUS === */
 .stStatus {
     border: 1px solid #e8e6e0 !important;
     border-radius: 10px !important;
     background: #fff !important;
 }
-
-/* === CANVAS === */
 .canvas-wrap {
     border-radius: 10px;
     overflow: hidden;
@@ -203,21 +212,12 @@ section[data-testid="stSidebar"] .stMarkdown h3 {
     background: #fff;
     box-shadow: 0 1px 4px rgba(0,0,0,0.04);
 }
-
-/* === FILE UPLOADER === */
-section[data-testid="stFileUploader"] {
-    border-radius: 10px !important;
-}
-
-/* === NUMBER INPUT === */
 .stNumberInput input {
     background: #fff !important;
     border: 1px solid #e0ddd5 !important;
     border-radius: 6px !important;
     color: #1a1a1a !important;
 }
-
-/* === EMPTY STATE === */
 .empty-state {
     display: flex;
     flex-direction: column;
@@ -228,29 +228,25 @@ section[data-testid="stFileUploader"] {
     border-radius: 12px;
     background: #fff;
 }
-.empty-state .pencil {
-    font-size: 2rem;
-    margin-bottom: 1rem;
-    opacity: 0.4;
-}
-.empty-state p {
-    color: #aaa;
-    font-size: 0.85rem;
-    margin: 0.15rem 0;
-}
+.empty-state .pencil { font-size: 2rem; margin-bottom: 1rem; opacity: 0.4; }
+.empty-state p { color: #aaa; font-size: 0.85rem; margin: 0.15rem 0; }
 .empty-state .steps {
     font-family: 'IBM Plex Mono', monospace;
     font-size: 0.7rem;
     color: #ccc;
     margin-top: 1rem;
-    letter-spacing: 0.03em;
 }
-
-/* === CAPTION === */
 .stCaption { font-size: 0.75rem !important; color: #999 !important; }
-
-/* === COLUMN GAP FIX === */
 [data-testid="stHorizontalBlock"] { gap: 1.5rem; }
+
+/* Variation grid */
+.var-label {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.65rem;
+    color: #999;
+    text-align: center;
+    margin-top: 0.3rem;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -268,8 +264,65 @@ if "history" not in st.session_state:
     st.session_state.history = []
 if "rendered_image" not in st.session_state:
     st.session_state.rendered_image = None
+if "rendered_variations" not in st.session_state:
+    st.session_state.rendered_variations = None
 if "sketch_image" not in st.session_state:
     st.session_state.sketch_image = None
+
+# --- Material Presets (Industrial Design focused) ---
+MATERIAL_PRESETS = {
+    "Matte Black": ", matte black finish, soft-touch coating, no reflections",
+    "Brushed Aluminum": ", brushed aluminum surface, subtle metallic grain, industrial",
+    "Anodized Metal": ", anodized aluminum, vibrant color finish, smooth surface",
+    "Injection Molded": ", injection-molded plastic, subtle parting lines, mass-produced look",
+    "Carbon Fiber": ", carbon fiber weave pattern, lightweight aerospace material",
+    "Polished Chrome": ", mirror-polished chrome, highly reflective, premium",
+    "Natural Wood": ", natural wood grain, warm walnut or oak, organic",
+    "Leather": ", premium leather, fine stitching, tactile texture",
+    "Frosted Glass": ", frosted translucent glass, diffused light, elegant",
+    "Concrete": ", raw concrete, brutalist, industrial texture",
+    "Ceramic": ", glazed white ceramic, smooth, minimalist",
+    "Fabric/Mesh": ", woven fabric mesh, breathable textile, soft",
+}
+
+LIGHTING_PRESETS = {
+    "Studio": ", professional studio lighting, soft diffused shadows, neutral background",
+    "Dramatic": ", dramatic side lighting, deep shadows, moody atmosphere",
+    "Natural": ", warm natural daylight, golden hour, outdoor setting",
+    "Product Shot": ", product photography, pure white background, commercial grade",
+    "Environment": ", in-context lifestyle setting, real-world environment",
+    "Blueprint": ", technical rendering, orthographic view, engineering style",
+}
+
+# --- Sketch Templates ---
+TEMPLATES = {
+    "None": None,
+    "Headphones": [("ellipse", 80, 120, 380, 380), ("ellipse", 140, 180, 320, 320), ("arc", 130, 40, 330, 200, 0, 180)],
+    "Bottle": [("line", 180, 60, 180, 400), ("line", 280, 60, 280, 400), ("line", 200, 60, 260, 60), ("arc", 160, 360, 300, 440, 0, 180)],
+    "Shoe": [("line", 60, 320, 400, 320), ("arc", 60, 200, 200, 340, 90, 270), ("line", 200, 200, 400, 240), ("line", 400, 240, 400, 320)],
+    "Chair": [("line", 120, 180, 120, 420), ("line", 340, 180, 340, 420), ("line", 120, 180, 340, 180), ("line", 100, 40, 100, 180), ("line", 360, 40, 360, 180), ("line", 100, 40, 360, 40)],
+    "Watch": [("ellipse", 130, 130, 330, 330), ("ellipse", 150, 150, 310, 310), ("line", 230, 160, 230, 230), ("line", 230, 230, 280, 260), ("line", 210, 100, 250, 100), ("line", 210, 360, 250, 360)],
+    "Cup/Mug": [("ellipse", 140, 80, 320, 140), ("line", 140, 110, 140, 360), ("line", 320, 110, 320, 360), ("ellipse", 140, 330, 320, 390), ("arc", 320, 160, 390, 300, -90, 90)],
+}
+
+
+def draw_template(template_name: str) -> Image.Image:
+    """Draw a faint template guide on a white canvas."""
+    img = Image.new("RGB", (460, 460), "white")
+    if template_name == "None" or template_name not in TEMPLATES or TEMPLATES[template_name] is None:
+        return img
+    draw = ImageDraw.Draw(img)
+    shapes = TEMPLATES[template_name]
+    color = "#ddd"
+    for shape in shapes:
+        if shape[0] == "ellipse":
+            draw.ellipse(shape[1:], outline=color, width=2)
+        elif shape[0] == "line":
+            draw.line(shape[1:], fill=color, width=2)
+        elif shape[0] == "arc":
+            draw.arc(shape[1:5], start=shape[5], end=shape[6], fill=color, width=2)
+    return img
+
 
 # --- Sidebar ---
 with st.sidebar:
@@ -305,34 +358,27 @@ with st.sidebar:
         st.markdown("---")
         st.markdown("### History")
         for i, item in enumerate(st.session_state.history[:5]):
-            truncated = item['prompt'][:45] + ("..." if len(item['prompt']) > 45 else "")
+            truncated = item['prompt'][:40] + ("..." if len(item['prompt']) > 40 else "")
             if st.button(f"{truncated}", key=f"hist_{i}"):
                 st.session_state.rendered_image = item["image"]
                 st.session_state.sketch_image = item["sketch"]
-
-# --- Style Presets ---
-STYLE_PRESETS = {
-    "Studio Light": ", professional studio lighting, soft shadows",
-    "Matte": ", matte material finish, no reflections",
-    "Chrome": ", glossy chrome finish, reflective surface",
-    "Wood": ", natural wood material, warm tones",
-    "Glass": ", transparent glass material, refractive",
-    "Concrete": ", raw concrete, brutalist aesthetic",
-    "Neon": ", neon edge lighting, vibrant glow",
-    "Product Shot": ", product photography, white background, commercial",
-}
+                st.session_state.rendered_variations = None
 
 # --- Main Layout ---
 left_col, right_col = st.columns([1.15, 1], gap="large")
 
 with left_col:
-    # --- Sketch Input ---
     st.markdown('<p class="section-label">Sketch</p>', unsafe_allow_html=True)
 
-    input_mode = st.radio(
-        "mode", ["Draw", "Upload"],
-        horizontal=True, label_visibility="collapsed",
-    )
+    mode_cols = st.columns([1, 1, 2])
+    with mode_cols[0]:
+        input_mode = st.radio("mode", ["Draw", "Upload"], horizontal=True, label_visibility="collapsed")
+    with mode_cols[2]:
+        template_choice = st.selectbox(
+            "Template guide", list(TEMPLATES.keys()),
+            label_visibility="collapsed",
+            help="Show a faint guide to help you sketch",
+        )
 
     if input_mode == "Draw":
         tool_cols = st.columns([1.5, 0.7, 1.3])
@@ -346,12 +392,15 @@ with left_col:
                 label_visibility="collapsed",
             )
 
+        # Generate background with template
+        bg_image = draw_template(template_choice)
+
         st.markdown('<div class="canvas-wrap">', unsafe_allow_html=True)
         canvas_result = st_canvas(
             fill_color="rgba(0, 0, 0, 0)",
             stroke_width=stroke_width,
             stroke_color=stroke_color,
-            background_color="#FFFFFF",
+            background_image=bg_image,
             height=460,
             width=460,
             drawing_mode=drawing_mode,
@@ -362,8 +411,10 @@ with left_col:
 
         if canvas_result.image_data is not None:
             sketch_img = Image.fromarray(canvas_result.image_data.astype("uint8"), "RGBA")
-            sketch_img = sketch_img.convert("RGB")
-            st.session_state.sketch_image = resize_for_api(sketch_img)
+            # Composite onto white (the template is just a guide)
+            white_bg = Image.new("RGB", sketch_img.size, "white")
+            white_bg.paste(sketch_img, mask=sketch_img.split()[3])
+            st.session_state.sketch_image = resize_for_api(white_bg)
     else:
         uploaded_file = st.file_uploader(
             "Drop a sketch here — PNG, JPG, WEBP",
@@ -380,35 +431,50 @@ with left_col:
     st.markdown('<p class="section-label">Prompt</p>', unsafe_allow_html=True)
     prompt = st.text_area(
         "prompt",
-        placeholder="What should this become?\ne.g. 'matte black wireless headphones, brushed aluminum accents, studio lighting'",
+        placeholder="What should this become?\ne.g. 'wireless over-ear headphones, premium consumer electronics product'",
         label_visibility="collapsed",
         height=80,
     )
 
-    # --- Style Presets ---
-    st.markdown('<p class="section-label">Style</p>', unsafe_allow_html=True)
-    preset_cols = st.columns(4)
-    selected_presets = []
-    for i, (name, suffix) in enumerate(STYLE_PRESETS.items()):
-        with preset_cols[i % 4]:
-            if st.checkbox(name, key=f"p_{name}"):
-                selected_presets.append(suffix)
+    # --- Material Presets ---
+    st.markdown('<p class="section-label">Material</p>', unsafe_allow_html=True)
+    mat_cols = st.columns(4)
+    selected_materials = []
+    for i, (name, suffix) in enumerate(MATERIAL_PRESETS.items()):
+        with mat_cols[i % 4]:
+            if st.checkbox(name, key=f"mat_{name}"):
+                selected_materials.append(suffix)
 
-    # --- Render Button ---
+    # --- Lighting Presets ---
+    st.markdown('<p class="section-label">Lighting & Context</p>', unsafe_allow_html=True)
+    light_cols = st.columns(3)
+    selected_lighting = []
+    for i, (name, suffix) in enumerate(LIGHTING_PRESETS.items()):
+        with light_cols[i % 3]:
+            if st.checkbox(name, key=f"light_{name}"):
+                selected_lighting.append(suffix)
+
+    # --- Render Buttons ---
     st.markdown("")
-    render_clicked = st.button("Generate", type="primary", use_container_width=True)
+    btn_cols = st.columns([2, 1])
+    with btn_cols[0]:
+        render_clicked = st.button("Generate", type="primary", use_container_width=True)
+    with btn_cols[1]:
+        variations_clicked = st.button("4 Variations", use_container_width=True,
+                                       help="Generate 4 different material/lighting combos")
 
 
 with right_col:
     st.markdown('<p class="section-label">Result</p>', unsafe_allow_html=True)
 
+    # Single render
     if render_clicked:
         if not prompt.strip():
             st.info("Add a prompt describing what you'd like the sketch to become.")
         elif st.session_state.sketch_image is None:
             st.info("Draw or upload a sketch first.")
         else:
-            full_prompt = prompt.strip() + "".join(selected_presets)
+            full_prompt = prompt.strip() + "".join(selected_materials) + "".join(selected_lighting)
 
             buf = io.BytesIO()
             st.session_state.sketch_image.save(buf, format="PNG")
@@ -422,57 +488,82 @@ with right_col:
                     st.write("Uploading sketch...")
                     time.sleep(0.3)
                     st.write("Analyzing geometry...")
+                    st.write("Rendering materials & lighting...")
 
-                    form_data = {
-                        "prompt": (None, full_prompt),
-                        "control_strength": (None, str(control_strength)),
-                        "output_format": (None, output_format),
-                        "image": ("sketch.png", sketch_bytes, "image/png"),
-                    }
-                    if negative_prompt:
-                        form_data["negative_prompt"] = (None, negative_prompt)
-                    if seed > 0:
-                        form_data["seed"] = (None, str(seed))
+                    img, err = call_stability_api(
+                        sketch_bytes, full_prompt, control_strength,
+                        output_format, negative_prompt, seed, api_key
+                    )
 
-                    try:
-                        st.write("Rendering materials & lighting...")
-                        with httpx.Client(timeout=60.0) as client:
-                            response = client.post(
-                                "https://api.stability.ai/v2beta/stable-image/control/sketch",
-                                headers={
-                                    "authorization": f"Bearer {api_key}",
-                                    "accept": "image/*",
-                                },
-                                files=form_data,
-                            )
+                    if img:
+                        status.update(label="Complete", state="complete")
+                        st.session_state.rendered_image = img
+                        st.session_state.rendered_variations = None
+                        st.session_state.history.insert(0, {
+                            "image": img,
+                            "sketch": st.session_state.sketch_image,
+                            "prompt": full_prompt,
+                        })
+                        st.session_state.history = st.session_state.history[:10]
+                    else:
+                        status.update(label="Failed", state="error")
+                        st.error(err)
 
-                        if response.status_code == 200:
-                            status.update(label="Complete", state="complete")
-                            rendered_img = Image.open(io.BytesIO(response.content))
-                            st.session_state.rendered_image = rendered_img
-                            st.session_state.history.insert(0, {
-                                "image": rendered_img,
-                                "sketch": st.session_state.sketch_image,
-                                "prompt": full_prompt,
-                            })
-                            st.session_state.history = st.session_state.history[:10]
-                        else:
-                            status.update(label="Failed", state="error")
-                            try:
-                                err = response.json()
-                            except Exception:
-                                err = response.text
-                            st.error(f"API error ({response.status_code}): {err}")
+    # Batch variations
+    if variations_clicked:
+        if not prompt.strip():
+            st.info("Add a prompt first.")
+        elif st.session_state.sketch_image is None:
+            st.info("Draw or upload a sketch first.")
+        else:
+            api_key = get_api_key()
+            if not api_key or api_key == "your_key_here":
+                st.error("Add your STABILITY_API_KEY to the .env file.")
+            else:
+                buf = io.BytesIO()
+                st.session_state.sketch_image.save(buf, format="PNG")
+                sketch_bytes = buf.getvalue()
 
-                    except httpx.TimeoutException:
-                        status.update(label="Timeout", state="error")
-                        st.error("Timed out — please try again.")
-                    except Exception as e:
-                        status.update(label="Error", state="error")
-                        st.error(f"{e}")
+                # 4 different material/lighting combos
+                variation_prompts = [
+                    (prompt.strip() + ", matte black finish, studio lighting, soft shadows", "Matte + Studio"),
+                    (prompt.strip() + ", brushed aluminum, natural daylight, warm tones", "Aluminum + Natural"),
+                    (prompt.strip() + ", glossy white ceramic, product photography, white background", "Ceramic + Product"),
+                    (prompt.strip() + ", carbon fiber weave, dramatic side lighting, dark background", "Carbon + Dramatic"),
+                ]
 
-    # Display
-    if st.session_state.rendered_image is not None:
+                with st.status("Generating 4 variations...", expanded=True) as status:
+                    results = []
+                    for i, (var_prompt, label) in enumerate(variation_prompts):
+                        st.write(f"Rendering variation {i+1}/4: {label}...")
+                        img, err = call_stability_api(
+                            sketch_bytes, var_prompt, control_strength,
+                            output_format, negative_prompt, 0, api_key
+                        )
+                        results.append((img, label, err))
+
+                    successful = [(img, label) for img, label, err in results if img is not None]
+                    if successful:
+                        status.update(label=f"{len(successful)}/4 complete", state="complete")
+                        st.session_state.rendered_variations = successful
+                        st.session_state.rendered_image = successful[0][0]
+                    else:
+                        status.update(label="Failed", state="error")
+                        st.error("All variations failed. Check your prompt or API key.")
+
+    # Display results
+    if st.session_state.rendered_variations:
+        st.markdown('<p class="section-label">Variations</p>', unsafe_allow_html=True)
+        var_cols = st.columns(2)
+        for i, (img, label) in enumerate(st.session_state.rendered_variations):
+            with var_cols[i % 2]:
+                st.image(img, use_container_width=True)
+                st.markdown(f'<p class="var-label">{label}</p>', unsafe_allow_html=True)
+                if st.button(f"Use this", key=f"var_{i}"):
+                    st.session_state.rendered_image = img
+                    st.session_state.rendered_variations = None
+
+    elif st.session_state.rendered_image is not None:
         view = st.radio(
             "view", ["Render", "Compare", "Sketch"],
             horizontal=True, label_visibility="collapsed",
