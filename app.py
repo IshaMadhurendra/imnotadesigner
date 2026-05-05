@@ -10,6 +10,19 @@ from streamlit_drawable_canvas import st_canvas
 
 load_dotenv()
 
+MAX_PIXELS = 9_000_000  # Stability AI limit is 9,437,184
+
+
+def resize_for_api(img: Image.Image) -> Image.Image:
+    """Resize image if it exceeds the Stability AI pixel limit."""
+    w, h = img.size
+    if w * h <= MAX_PIXELS:
+        return img
+    scale = (MAX_PIXELS / (w * h)) ** 0.5
+    new_w = int(w * scale)
+    new_h = int(h * scale)
+    return img.resize((new_w, new_h), Image.LANCZOS)
+
 
 def get_api_key():
     """Get API key from Streamlit secrets (cloud) or .env (local)."""
@@ -350,7 +363,7 @@ with left_col:
         if canvas_result.image_data is not None:
             sketch_img = Image.fromarray(canvas_result.image_data.astype("uint8"), "RGBA")
             sketch_img = sketch_img.convert("RGB")
-            st.session_state.sketch_image = sketch_img
+            st.session_state.sketch_image = resize_for_api(sketch_img)
     else:
         uploaded_file = st.file_uploader(
             "Drop a sketch here — PNG, JPG, WEBP",
@@ -359,7 +372,7 @@ with left_col:
         )
         if uploaded_file:
             sketch_img = Image.open(uploaded_file).convert("RGB")
-            st.session_state.sketch_image = sketch_img
+            st.session_state.sketch_image = resize_for_api(sketch_img)
             st.image(sketch_img, use_container_width=True)
 
     # --- Prompt ---
