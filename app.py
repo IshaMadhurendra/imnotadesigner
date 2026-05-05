@@ -30,43 +30,25 @@ def get_api_key():
         return os.getenv("STABILITY_API_KEY", "")
 
 
-DEFAULT_NEGATIVE = "human, person, model, mannequin, body, face, hands, fingers, people, figure, torso, extra elements"
-
-# Two endpoints: sketch (for drawn sketches) and structure (for uploads - preserves exact structure)
 SKETCH_URL = "https://api.stability.ai/v2beta/stable-image/control/sketch"
-STRUCTURE_URL = "https://api.stability.ai/v2beta/stable-image/control/structure"
-
-
-def crop_to_content(img: Image.Image) -> Image.Image:
-    """Crop image tightly to non-white content with small padding."""
-    import numpy as np
-    arr = np.array(img)
-    mask = np.any(arr < 250, axis=2)
-    if not mask.any():
-        return img
-    rows = np.any(mask, axis=1)
-    cols = np.any(mask, axis=0)
-    rmin, rmax = np.where(rows)[0][[0, -1]]
-    cmin, cmax = np.where(cols)[0][[0, -1]]
-    h, w = arr.shape[:2]
-    pad = max(int(min(h, w) * 0.05), 10)
-    rmin = max(0, rmin - pad)
-    rmax = min(h - 1, rmax + pad)
-    cmin = max(0, cmin - pad)
-    cmax = min(w - 1, cmax + pad)
-    return img.crop((cmin, rmin, cmax + 1, rmax + 1))
 
 
 def call_stability_api(sketch_bytes: bytes, prompt: str, control_strength: float,
-                       output_format: str, negative_prompt: str, seed: int, api_key: str,
-                       use_structure: bool = False):
-    """Call Stability AI. Uses structure endpoint for uploads (preserves exact geometry)."""
-    full_negative = DEFAULT_NEGATIVE
+                       output_format: str, negative_prompt: str, seed: int, api_key: str):
+    """Call Stability AI sketch endpoint. Returns (Image, None) or (None, error_str)."""
+    # Wrap user prompt: be explicit about following the sketch exactly and only rendering what's described
+    full_prompt = (
+        f"A photorealistic render of exactly this: {prompt}. "
+        f"Follow the sketch lines precisely. Only include what is described. "
+        f"Do not add any extra objects, people, or elements not mentioned in the description."
+    )
+
+    full_negative = "extra objects, additional elements not described, human, person, model, mannequin, text, watermark, signature"
     if negative_prompt:
-        full_negative = negative_prompt + ", " + DEFAULT_NEGATIVE
+        full_negative = negative_prompt + ", " + full_negative
 
     form_data = {
-        "prompt": (None, prompt),
+        "prompt": (None, full_prompt),
         "control_strength": (None, str(control_strength)),
         "output_format": (None, output_format),
         "image": ("sketch.png", sketch_bytes, "image/png"),
@@ -75,11 +57,9 @@ def call_stability_api(sketch_bytes: bytes, prompt: str, control_strength: float
     if seed > 0:
         form_data["seed"] = (None, str(seed))
 
-    url = STRUCTURE_URL if use_structure else SKETCH_URL
-
     with httpx.Client(timeout=60.0) as client:
         response = client.post(
-            url,
+            SKETCH_URL,
             headers={
                 "authorization": f"Bearer {api_key}",
                 "accept": "image/*",
@@ -333,7 +313,7 @@ with st.sidebar:
 
     st.markdown('<p class="section-label">Sketch Fidelity</p>', unsafe_allow_html=True)
     control_strength = st.slider(
-        "fidelity", min_value=0.0, max_value=1.0, value=0.7, step=0.05,
+        "fidelity", min_value=0.0, max_value=1.0, value=0.85, step=0.05,
         help="Higher = output follows your sketch lines more closely",
         label_visibility="collapsed",
     )
@@ -373,53 +353,36 @@ left_col, right_col = st.columns([1.15, 1], gap="large")
 with left_col:
     st.markdown('<p class="section-label">Sketch</p>', unsafe_allow_html=True)
 
-    input_mode = st.radio("mode", ["Draw", "Upload"], horizontal=True, label_visibility="collapsed")
-
-    if input_mode == "Draw":
-        tool_cols = st.columns([1.5, 0.7, 1.3])
-        with tool_cols[0]:
-            stroke_width = st.slider("Brush", 1, 20, 3, label_visibility="collapsed")
-        with tool_cols[1]:
-            stroke_color = st.color_picker("", "#1a1a1a", label_visibility="collapsed")
-        with tool_cols[2]:
-            drawing_mode = st.selectbox(
-                "tool", ["freedraw", "line", "rect", "circle"],
-                label_visibility="collapsed",
-            )
-
-        st.markdown('<div class="canvas-wrap">', unsafe_allow_html=True)
-        canvas_result = st_canvas(
-            fill_color="rgba(0, 0, 0, 0)",
-            stroke_width=stroke_width,
-            stroke_color=stroke_color,
-            background_color="#FFFFFF",
-            height=460,
-            width=460,
-            drawing_mode=drawing_mode,
-            key="sketch_canvas",
-            display_toolbar=True,
-        )
-        st.markdown('</div>', unsafe_allow_html=True)
-
-        if canvas_result.image_data is not None:
-            sketch_img = Image.fromarray(canvas_result.image_data.astype("uint8"), "RGBA")
-            # Composite onto white (the template is just a guide)
-            white_bg = Image.new("RGB", sketch_img.size, "white")
-            white_bg.paste(sketch_img, mask=sketch_img.split()[3])
-            st.session_state.sketch_image = resize_for_api(white_bg)
-            st.session_state.is_upload = False
-    else:
-        uploaded_file = st.file_uploader(
-            "Drop a sketch here — PNG, JPG, WEBP",
-            type=["png", "jpg", "jpeg", "webp"],
+    tool_cols = st.columns([1.5, 0.7, 1.3])
+    with tool_cols[0]:
+        stroke_width = st.slider("Brush", 1, 20, 3, label_visibility="collapsed")
+    with tool_cols[1]:
+        stroke_color = st.color_picker("", "#1a1a1a", label_visibility="collapsed")
+    with tool_cols[2]:
+        drawing_mode = st.selectbox(
+            "tool", ["freedraw", "line", "rect", "circle"],
             label_visibility="collapsed",
         )
-        if uploaded_file:
-            sketch_img = Image.open(uploaded_file).convert("RGB")
-            sketch_img = crop_to_content(sketch_img)
-            st.session_state.sketch_image = resize_for_api(sketch_img)
-            st.session_state.is_upload = True
-            st.image(sketch_img, use_container_width=True)
+
+    st.markdown('<div class="canvas-wrap">', unsafe_allow_html=True)
+    canvas_result = st_canvas(
+        fill_color="rgba(0, 0, 0, 0)",
+        stroke_width=stroke_width,
+        stroke_color=stroke_color,
+        background_color="#FFFFFF",
+        height=460,
+        width=460,
+        drawing_mode=drawing_mode,
+        key="sketch_canvas",
+        display_toolbar=True,
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    if canvas_result.image_data is not None:
+        sketch_img = Image.fromarray(canvas_result.image_data.astype("uint8"), "RGBA")
+        white_bg = Image.new("RGB", sketch_img.size, "white")
+        white_bg.paste(sketch_img, mask=sketch_img.split()[3])
+        st.session_state.sketch_image = resize_for_api(white_bg)
 
     # --- Prompt ---
     st.markdown("")
@@ -485,14 +448,9 @@ with right_col:
                     st.write("Analyzing geometry...")
                     st.write("Rendering materials & lighting...")
 
-                    is_upload = st.session_state.get("is_upload", False)
-                    # Use structure endpoint for uploads (preserves exact geometry, no hallucination)
-                    effective_strength = min(control_strength + 0.15, 1.0) if is_upload else control_strength
-
                     img, err = call_stability_api(
-                        sketch_bytes, full_prompt, effective_strength,
+                        sketch_bytes, full_prompt, control_strength,
                         output_format, negative_prompt, seed, api_key,
-                        use_structure=is_upload,
                     )
 
                     if img:
@@ -536,11 +494,9 @@ with right_col:
                     results = []
                     for i, (var_prompt, label) in enumerate(variation_prompts):
                         st.write(f"Rendering variation {i+1}/4: {label}...")
-                        is_upload = st.session_state.get("is_upload", False)
                         img, err = call_stability_api(
                             sketch_bytes, var_prompt, control_strength,
                             output_format, negative_prompt, 0, api_key,
-                            use_structure=is_upload,
                         )
                         results.append((img, label, err))
 
