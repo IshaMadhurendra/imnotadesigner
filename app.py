@@ -10,6 +10,15 @@ from streamlit_drawable_canvas import st_canvas
 
 load_dotenv()
 
+
+def get_api_key():
+    """Get API key from Streamlit secrets (cloud) or .env (local)."""
+    try:
+        return st.secrets["STABILITY_API_KEY"]
+    except (KeyError, FileNotFoundError):
+        return os.getenv("STABILITY_API_KEY", "")
+
+
 st.set_page_config(
     page_title="i'mnotadesigner",
     page_icon="✏️",
@@ -392,7 +401,7 @@ with right_col:
             st.session_state.sketch_image.save(buf, format="PNG")
             sketch_bytes = buf.getvalue()
 
-            api_key = os.getenv("STABILITY_API_KEY", "")
+            api_key = get_api_key()
             if not api_key or api_key == "your_key_here":
                 st.error("Add your STABILITY_API_KEY to the .env file.")
             else:
