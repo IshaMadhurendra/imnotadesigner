@@ -30,17 +30,27 @@ def get_api_key():
         return os.getenv("STABILITY_API_KEY", "")
 
 
+DEFAULT_NEGATIVE = "human, person, model, mannequin, body, face, hands, fingers, people, figure, torso, legs, arms, extra fabric, extended design, additional elements beyond the sketch"
+
+
 def call_stability_api(sketch_bytes: bytes, prompt: str, control_strength: float,
                        output_format: str, negative_prompt: str, seed: int, api_key: str):
     """Call Stability AI sketch endpoint. Returns (Image, None) or (None, error_str)."""
+    # Always enforce: only render what's in the sketch
+    full_prompt = prompt + ", isolated product only, render exactly what is shown in the sketch, nothing more, no background scene, no human model"
+
+    # Combine user negative prompt with defaults
+    full_negative = DEFAULT_NEGATIVE
+    if negative_prompt:
+        full_negative = negative_prompt + ", " + DEFAULT_NEGATIVE
+
     form_data = {
-        "prompt": (None, prompt),
+        "prompt": (None, full_prompt),
         "control_strength": (None, str(control_strength)),
         "output_format": (None, output_format),
         "image": ("sketch.png", sketch_bytes, "image/png"),
+        "negative_prompt": (None, full_negative),
     }
-    if negative_prompt:
-        form_data["negative_prompt"] = (None, negative_prompt)
     if seed > 0:
         form_data["seed"] = (None, str(seed))
 
