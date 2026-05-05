@@ -30,14 +30,36 @@ def get_api_key():
         return os.getenv("STABILITY_API_KEY", "")
 
 
-DEFAULT_NEGATIVE = "human, person, model, mannequin, body, face, hands, fingers, people, figure, torso, legs, arms, extra fabric, extended design, additional elements beyond the sketch"
+DEFAULT_NEGATIVE = "human, person, model, mannequin, body, face, hands, fingers, people, figure, torso, legs, arms, extra fabric, extended design, additional elements beyond the sketch, completing the image, imagining unseen parts"
+
+
+def crop_to_content(img: Image.Image) -> Image.Image:
+    """Crop image tightly to non-white content with small padding to prevent AI from filling whitespace."""
+    import numpy as np
+    arr = np.array(img)
+    # Find non-white pixels (threshold at 250 to catch near-white)
+    mask = np.any(arr < 250, axis=2)
+    if not mask.any():
+        return img
+    rows = np.any(mask, axis=1)
+    cols = np.any(mask, axis=0)
+    rmin, rmax = np.where(rows)[0][[0, -1]]
+    cmin, cmax = np.where(cols)[0][[0, -1]]
+    # Add small padding (5% of size)
+    h, w = arr.shape[:2]
+    pad = max(int(min(h, w) * 0.05), 10)
+    rmin = max(0, rmin - pad)
+    rmax = min(h - 1, rmax + pad)
+    cmin = max(0, cmin - pad)
+    cmax = min(w - 1, cmax + pad)
+    return img.crop((cmin, rmin, cmax + 1, rmax + 1))
 
 
 def call_stability_api(sketch_bytes: bytes, prompt: str, control_strength: float,
                        output_format: str, negative_prompt: str, seed: int, api_key: str):
     """Call Stability AI sketch endpoint. Returns (Image, None) or (None, error_str)."""
     # Always enforce: only render what's in the sketch
-    full_prompt = prompt + ", isolated product only, render exactly what is shown in the sketch, nothing more, no background scene, no human model"
+    full_prompt = prompt + ", isolated object only, render only what is visible in the sketch, do not complete or extend the design, do not add anything not drawn, flat product view, no human model"
 
     # Combine user negative prompt with defaults
     full_negative = DEFAULT_NEGATIVE
@@ -384,6 +406,7 @@ with left_col:
             white_bg = Image.new("RGB", sketch_img.size, "white")
             white_bg.paste(sketch_img, mask=sketch_img.split()[3])
             st.session_state.sketch_image = resize_for_api(white_bg)
+            st.session_state.is_upload = False
     else:
         uploaded_file = st.file_uploader(
             "Drop a sketch here — PNG, JPG, WEBP",
@@ -392,7 +415,9 @@ with left_col:
         )
         if uploaded_file:
             sketch_img = Image.open(uploaded_file).convert("RGB")
+            sketch_img = crop_to_content(sketch_img)
             st.session_state.sketch_image = resize_for_api(sketch_img)
+            st.session_state.is_upload = True
             st.image(sketch_img, use_container_width=True)
 
     # --- Prompt ---
@@ -459,8 +484,11 @@ with right_col:
                     st.write("Analyzing geometry...")
                     st.write("Rendering materials & lighting...")
 
+                    # Use higher fidelity for uploads to prevent AI from extending the design
+                    effective_strength = min(control_strength + 0.2, 1.0) if st.session_state.get("is_upload") else control_strength
+
                     img, err = call_stability_api(
-                        sketch_bytes, full_prompt, control_strength,
+                        sketch_bytes, full_prompt, effective_strength,
                         output_format, negative_prompt, seed, api_key
                     )
 
