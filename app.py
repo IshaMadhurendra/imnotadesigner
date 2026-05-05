@@ -4,7 +4,7 @@ import time
 import httpx
 import streamlit as st
 from dotenv import load_dotenv
-from PIL import Image, ImageDraw
+from PIL import Image
 from streamlit_drawable_canvas import st_canvas
 
 load_dotenv()
@@ -292,34 +292,6 @@ LIGHTING_PRESETS = {
     "Blueprint": ", technical rendering, orthographic view, engineering style",
 }
 
-# --- Sketch Templates ---
-TEMPLATES = {
-    "None": None,
-    "Headphones": [("ellipse", 80, 120, 380, 380), ("ellipse", 140, 180, 320, 320), ("arc", 130, 40, 330, 200, 0, 180)],
-    "Bottle": [("line", 180, 60, 180, 400), ("line", 280, 60, 280, 400), ("line", 200, 60, 260, 60), ("arc", 160, 360, 300, 440, 0, 180)],
-    "Shoe": [("line", 60, 320, 400, 320), ("arc", 60, 200, 200, 340, 90, 270), ("line", 200, 200, 400, 240), ("line", 400, 240, 400, 320)],
-    "Chair": [("line", 120, 180, 120, 420), ("line", 340, 180, 340, 420), ("line", 120, 180, 340, 180), ("line", 100, 40, 100, 180), ("line", 360, 40, 360, 180), ("line", 100, 40, 360, 40)],
-    "Watch": [("ellipse", 130, 130, 330, 330), ("ellipse", 150, 150, 310, 310), ("line", 230, 160, 230, 230), ("line", 230, 230, 280, 260), ("line", 210, 100, 250, 100), ("line", 210, 360, 250, 360)],
-    "Cup/Mug": [("ellipse", 140, 80, 320, 140), ("line", 140, 110, 140, 360), ("line", 320, 110, 320, 360), ("ellipse", 140, 330, 320, 390), ("arc", 320, 160, 390, 300, -90, 90)],
-}
-
-
-def draw_template(template_name: str) -> Image.Image:
-    """Draw a faint template guide on a white canvas."""
-    img = Image.new("RGB", (460, 460), "white")
-    if template_name == "None" or template_name not in TEMPLATES or TEMPLATES[template_name] is None:
-        return img
-    draw = ImageDraw.Draw(img)
-    shapes = TEMPLATES[template_name]
-    color = "#ddd"
-    for shape in shapes:
-        if shape[0] == "ellipse":
-            draw.ellipse(shape[1:], outline=color, width=2)
-        elif shape[0] == "line":
-            draw.line(shape[1:], fill=color, width=2)
-        elif shape[0] == "arc":
-            draw.arc(shape[1:5], start=shape[5], end=shape[6], fill=color, width=2)
-    return img
 
 
 # --- Sidebar ---
@@ -368,15 +340,7 @@ left_col, right_col = st.columns([1.15, 1], gap="large")
 with left_col:
     st.markdown('<p class="section-label">Sketch</p>', unsafe_allow_html=True)
 
-    mode_cols = st.columns([1, 1, 2])
-    with mode_cols[0]:
-        input_mode = st.radio("mode", ["Draw", "Upload"], horizontal=True, label_visibility="collapsed")
-    with mode_cols[2]:
-        template_choice = st.selectbox(
-            "Template guide", list(TEMPLATES.keys()),
-            label_visibility="collapsed",
-            help="Show a faint guide to help you sketch",
-        )
+    input_mode = st.radio("mode", ["Draw", "Upload"], horizontal=True, label_visibility="collapsed")
 
     if input_mode == "Draw":
         tool_cols = st.columns([1.5, 0.7, 1.3])
@@ -389,11 +353,6 @@ with left_col:
                 "tool", ["freedraw", "line", "rect", "circle"],
                 label_visibility="collapsed",
             )
-
-        # Show template guide as reference if selected
-        if template_choice != "None":
-            template_img = draw_template(template_choice)
-            st.image(template_img, caption="Template guide — sketch over this shape", use_container_width=True)
 
         st.markdown('<div class="canvas-wrap">', unsafe_allow_html=True)
         canvas_result = st_canvas(
