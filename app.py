@@ -1,8 +1,6 @@
 import io
 import os
 import time
-import concurrent.futures
-
 import httpx
 import streamlit as st
 from dotenv import load_dotenv
@@ -392,15 +390,17 @@ with left_col:
                 label_visibility="collapsed",
             )
 
-        # Generate background with template
-        bg_image = draw_template(template_choice)
+        # Show template guide as reference if selected
+        if template_choice != "None":
+            template_img = draw_template(template_choice)
+            st.image(template_img, caption="Template guide — sketch over this shape", use_container_width=True)
 
         st.markdown('<div class="canvas-wrap">', unsafe_allow_html=True)
         canvas_result = st_canvas(
             fill_color="rgba(0, 0, 0, 0)",
             stroke_width=stroke_width,
             stroke_color=stroke_color,
-            background_image=bg_image,
+            background_color="#FFFFFF",
             height=460,
             width=460,
             drawing_mode=drawing_mode,
