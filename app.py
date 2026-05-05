@@ -30,14 +30,17 @@ def get_api_key():
         return os.getenv("STABILITY_API_KEY", "")
 
 
-DEFAULT_NEGATIVE = "human, person, model, mannequin, body, face, hands, fingers, people, figure, torso, legs, arms, extra fabric, extended design, additional elements beyond the sketch, completing the image, imagining unseen parts"
+DEFAULT_NEGATIVE = "human, person, model, mannequin, body, face, hands, fingers, people, figure, torso, extra elements"
+
+# Two endpoints: sketch (for drawn sketches) and structure (for uploads - preserves exact structure)
+SKETCH_URL = "https://api.stability.ai/v2beta/stable-image/control/sketch"
+STRUCTURE_URL = "https://api.stability.ai/v2beta/stable-image/control/structure"
 
 
 def crop_to_content(img: Image.Image) -> Image.Image:
-    """Crop image tightly to non-white content with small padding to prevent AI from filling whitespace."""
+    """Crop image tightly to non-white content with small padding."""
     import numpy as np
     arr = np.array(img)
-    # Find non-white pixels (threshold at 250 to catch near-white)
     mask = np.any(arr < 250, axis=2)
     if not mask.any():
         return img
@@ -45,7 +48,6 @@ def crop_to_content(img: Image.Image) -> Image.Image:
     cols = np.any(mask, axis=0)
     rmin, rmax = np.where(rows)[0][[0, -1]]
     cmin, cmax = np.where(cols)[0][[0, -1]]
-    # Add small padding (5% of size)
     h, w = arr.shape[:2]
     pad = max(int(min(h, w) * 0.05), 10)
     rmin = max(0, rmin - pad)
@@ -56,18 +58,15 @@ def crop_to_content(img: Image.Image) -> Image.Image:
 
 
 def call_stability_api(sketch_bytes: bytes, prompt: str, control_strength: float,
-                       output_format: str, negative_prompt: str, seed: int, api_key: str):
-    """Call Stability AI sketch endpoint. Returns (Image, None) or (None, error_str)."""
-    # Always enforce: only render what's in the sketch
-    full_prompt = prompt + ", isolated object only, render only what is visible in the sketch, do not complete or extend the design, do not add anything not drawn, flat product view, no human model"
-
-    # Combine user negative prompt with defaults
+                       output_format: str, negative_prompt: str, seed: int, api_key: str,
+                       use_structure: bool = False):
+    """Call Stability AI. Uses structure endpoint for uploads (preserves exact geometry)."""
     full_negative = DEFAULT_NEGATIVE
     if negative_prompt:
         full_negative = negative_prompt + ", " + DEFAULT_NEGATIVE
 
     form_data = {
-        "prompt": (None, full_prompt),
+        "prompt": (None, prompt),
         "control_strength": (None, str(control_strength)),
         "output_format": (None, output_format),
         "image": ("sketch.png", sketch_bytes, "image/png"),
@@ -76,9 +75,11 @@ def call_stability_api(sketch_bytes: bytes, prompt: str, control_strength: float
     if seed > 0:
         form_data["seed"] = (None, str(seed))
 
+    url = STRUCTURE_URL if use_structure else SKETCH_URL
+
     with httpx.Client(timeout=60.0) as client:
         response = client.post(
-            "https://api.stability.ai/v2beta/stable-image/control/sketch",
+            url,
             headers={
                 "authorization": f"Bearer {api_key}",
                 "accept": "image/*",
@@ -484,12 +485,14 @@ with right_col:
                     st.write("Analyzing geometry...")
                     st.write("Rendering materials & lighting...")
 
-                    # Use higher fidelity for uploads to prevent AI from extending the design
-                    effective_strength = min(control_strength + 0.2, 1.0) if st.session_state.get("is_upload") else control_strength
+                    is_upload = st.session_state.get("is_upload", False)
+                    # Use structure endpoint for uploads (preserves exact geometry, no hallucination)
+                    effective_strength = min(control_strength + 0.15, 1.0) if is_upload else control_strength
 
                     img, err = call_stability_api(
                         sketch_bytes, full_prompt, effective_strength,
-                        output_format, negative_prompt, seed, api_key
+                        output_format, negative_prompt, seed, api_key,
+                        use_structure=is_upload,
                     )
 
                     if img:
@@ -533,9 +536,11 @@ with right_col:
                     results = []
                     for i, (var_prompt, label) in enumerate(variation_prompts):
                         st.write(f"Rendering variation {i+1}/4: {label}...")
+                        is_upload = st.session_state.get("is_upload", False)
                         img, err = call_stability_api(
                             sketch_bytes, var_prompt, control_strength,
-                            output_format, negative_prompt, 0, api_key
+                            output_format, negative_prompt, 0, api_key,
+                            use_structure=is_upload,
                         )
                         results.append((img, label, err))
 
